@@ -8,11 +8,22 @@ import ssl
 import json
 import websocket
 import _thread
+import numpy as np
+import sounddevice as sd
+
+import pyaudio
+import wave
+import boto3
 
 from amazon_transcribe.eventstream import EventStreamMessageSerializer
 from amazon_transcribe.eventstream import EventStreamBuffer
 
 from boto3.session import Session
+region = "us-east-1"
+
+translate = boto3.client(service_name='translate', region_name=region, use_ssl=True)
+
+
 
 # GETTING STARTED
 #   pip3 install websocket-client
@@ -23,6 +34,23 @@ from boto3.session import Session
 # open websocket debug output
 # websocket.enableTrace(True)
 websocket.enableTrace(False)
+
+FORMAT = pyaudio.paInt16
+
+# if you don't know your microphone on which channel, can uncommet next line to print the list.
+#print(sd.query_devices()) 
+CHANNELS = 1 
+RATE = 16000
+CHUNK = 1024
+RECORD_SECONDS = 5
+
+audio = pyaudio.PyAudio()
+     
+# start Recording
+source = audio.open(format=FORMAT, channels=CHANNELS,
+                rate=RATE, input=True,
+                frames_per_buffer=CHUNK)
+print("recording...")
 
 def sign(key, msg):
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
@@ -92,7 +120,7 @@ def create_pre_signed_url(region, language_code, media_encoding, sample_rate):
 
 def send_data(ws):
 
-    testFile = "xxx.pem"
+    testFile = "file.pcm"
 
     bufferSize = 1024*16
     # bufferSize = 65004
@@ -105,17 +133,18 @@ def send_data(ws):
 
     eventstream_serializer = EventStreamMessageSerializer()
 
-    with open(testFile, "rb") as source:
-        while True:
-            audio_chunk = source.read(bufferSize)
-            # 将音频数据进行编码
-            event_bytes = eventstream_serializer.serialize(stream_headers, audio_chunk)
+    #with open(testFile, "rb") as source:
+    while True:
+        #audio_chunk = source.read(bufferSize)
+        audio_chunk = source.read(CHUNK,exception_on_overflow = False)
+        # 将音频数据进行编码
+        event_bytes = eventstream_serializer.serialize(stream_headers, audio_chunk)
 
-            ws.send(event_bytes, opcode = 0x2) # 0 x 2 send binary
+        ws.send(event_bytes, opcode = 0x2) # 0 x 2 send binary
 
-            # end with b'' data bytes
-            if len(audio_chunk) == 0:
-                break
+        # end with b'' data bytes
+        if len(audio_chunk) == 0:
+            break
 
 
 def loop_receiving(ws):
@@ -135,7 +164,7 @@ def loop_receiving(ws):
 
             transcript = json.loads(bytes.decode(stream_payload, "UTF-8"))
 
-            print("response:",transcript)
+            #print("response:",transcript)
 
             results = transcript['Transcript']['Results']
             if len(results)>0:
@@ -146,9 +175,13 @@ def loop_receiving(ws):
                     if 'Alternatives' in results[length]:
                         alternatives = results[length]['Alternatives']
                         if len(alternatives)>0:
-                            for sublength in range(len(alternatives)):
-                                if 'Transcript' in alternatives[sublength]:
-                                    print('Transcript:', alternatives[sublength]['Transcript'])
+                            #for sublength in range(len(alternatives)):
+                            sublength = 0
+                            if 'Transcript' in alternatives[sublength]:
+                                transcript = alternatives[sublength]['Transcript']
+                                print(f'{datetime.now()} - Transcript-中文:{transcript}' )
+                                translatedText = translate.translate_text(Text=transcript, SourceLanguageCode="zh", TargetLanguageCode="en").get("TranslatedText")
+                                print(f'{datetime.now()} - Transcript-English:{translatedText}')
 
 
     except Exception as e:
@@ -158,16 +191,39 @@ def loop_receiving(ws):
             print(f"Exception Name: {e.__class__.__name__}")
 
 
+def audio_callback(indata, frames, time, status):
+       volume_norm = np.linalg.norm(indata) * 10
+       print("|" * int(volume_norm))
+
+def microphone():
+
+    duration = 10 #in seconds
+
+    stream = sd.InputStream(callback=audio_callback)
+    with stream:
+       sd.sleep(duration * 1000)
+
 def main():
-    url = create_pre_signed_url("us-east-1", "en-US", "pcm", "16000")
+    url = create_pre_signed_url(region, "zh-CN", "pcm", "16000")
+    print(f"url:{url}")
     ws = websocket.create_connection(url, sslopt={"cert_reqs": ssl.CERT_NONE})
 
     _thread.start_new_thread(loop_receiving, (ws,))
     print("Receiving...")
+
     send_data(ws)
+    print("finished recording")
+ 
+ 
+    # stop Recording
+    source.stop_stream()
+    stream.close()
+    audio.terminate()
+ 
 
     while True:
         time.sleep(1)
 
+#microphone()
 main()
 
